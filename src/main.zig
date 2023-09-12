@@ -11,6 +11,13 @@ fn Vec2(comptime T: type) type {
             return @This() { .x = x, .y = y };
         }
 
+        fn add(self: @This(), other: anytype) @This() {
+            return @This() {
+                .x = self.x + @as(inner_type, @intCast(other.x)),
+                .y = self.y - @as(inner_type, @intCast(other.y)),
+            };
+        }
+
         fn subtract(self: @This(), other: anytype) @This() {
             return @This() {
                 .x = self.x - @as(inner_type, @intCast(other.x)),
@@ -67,6 +74,21 @@ const Pannel = struct {
     fn setCursor(self: @This(), writer: anytype, x: u16, y: u16) !void {
         const new_cursor = self.toAbsolutePosition(x, y);
         try writer.print("\x1b[{};{}H", .{ new_cursor.y, new_cursor.x });
+    }
+
+    fn clear(self: *const @This(), writer: anytype) !void {
+        const allocator = std.heap.page_allocator;
+        const line = try allocator.alloc(u8, self.dimensions.x - 2);
+        defer allocator.free(line);
+
+        for (1..self.dimensions.x - 2) |i| {
+            line[i] = ' ';
+        }
+
+        for (1..self.dimensions.y - 1) |i| {
+            try self.setCursor(writer, 1, @intCast(i));
+            try writer.writeAll(line);
+        }
     }
 };
 
@@ -168,6 +190,7 @@ const Direction = enum {
 const Snake = struct {
     allocator : std.mem.Allocator,
     nodes     : List,
+    mouth_pos : Vec2(u16),
     facing    : Direction,
 
     const List = std.SinglyLinkedList(Vec2(u16));
@@ -187,11 +210,13 @@ const Snake = struct {
             nodes = new_node;
         }
 
-        nodes.?.findLast().*.next = nodes;
+        const mouth = nodes.?.findLast();
+        mouth.*.next = nodes;
         return @This() {
             .allocator = allocator,
             .nodes     = List { .first = nodes, },
             .facing    = direction,
+            .mouth_pos = mouth.data,
         };
     }
 
@@ -214,8 +239,15 @@ const Snake = struct {
         var node_iter = self.iterOverNodes();
         while (node_iter.next()) |node| {
             try parent_pannel.setCursor(writer, node.data.x * 2, node.data.y);
-            try writer.print("\x1b[7m  ", .{});
+            try writer.print("\x1b[7m  \x1b[0m", .{});
         }
+    }
+
+    fn step(self: *@This()) void {
+        const new_mouth_pos = self.mouth_pos.add(self.facing.toVec2());
+        self.nodes.first.?.data = new_mouth_pos;
+        self.nodes.first = self.nodes.first.?.next;
+        self.mouth_pos = new_mouth_pos;
     }
 };
 
@@ -257,7 +289,14 @@ pub fn main() !void {
 
     var snake = try Snake.init(5, Direction.Est, 10, 10, allocator);
     defer snake.deinit();
+
     try snake.render(writer, pannel);
+    for (0..10) |_| {
+        std.time.sleep(100_000_000);
+        try pannel.clear(writer);
+        snake.step();
+        try snake.render(writer, pannel);
+    }
 
     while (true) {
         var buffer: [1]u8 = undefined;
