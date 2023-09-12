@@ -5,9 +5,24 @@ fn Vec2(comptime T: type) type {
     return struct {
         x: T,
         y: T,
+        const inner_type = T;
 
         fn new(x: T, y: T) @This() {
             return @This() { .x = x, .y = y };
+        }
+
+        fn subtract(self: @This(), other: anytype) @This() {
+            return @This() {
+                .x = self.x - @as(inner_type, @intCast(other.x)),
+                .y = self.y - @as(inner_type, @intCast(other.y)),
+            };
+        }
+
+        fn multiplyInt(self: @This(), factor: i8) @This() {
+            return @This() {
+                .x = self.x * factor,
+                .y = self.y * factor,
+            };
         }
     };
 }
@@ -60,9 +75,8 @@ const Window = struct {
     dimensions       : Vec2(u16),
     original_termios : os.system.termios,
     termios          : os.system.termios,
-    pannels          : std.ArrayList(Pannel),
 
-    fn init(allocator: std.mem.Allocator) !@This() {
+    fn init() !@This() {
         // Get acces to the terminal window
         var tty = try std.fs.openFileAbsolute("/dev/tty", .{ .mode = .read_write });
 
@@ -118,10 +132,9 @@ const Window = struct {
 
         return @This() {
             .tty = tty,
-            .dimensions = Vec2(u16) { .x = size.ws_row, .y = size.ws_col },
+            .dimensions = Vec2(u16) { .x = size.ws_col, .y = size.ws_row },
             .original_termios = original_termios,
             .termios = termios,
-            .pannels = std.ArrayList(Pannel).init(allocator),
         };
     }
 
@@ -138,21 +151,113 @@ const Window = struct {
     }
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
+const Direction = enum {
+    North, Est, South, West,
 
-    var window = try Window.init(allocator);
+    fn toVec2(self: @This()) Vec2(i8) {
+        return switch (self) {
+            @This().North => Vec2(i8) { .x =  0, .y = -1 },
+            @This().Est   => Vec2(i8) { .x =  1, .y =  0 },
+            @This().South => Vec2(i8) { .x =  0, .y =  1 },
+            @This().West  => Vec2(i8) { .x = -1, .y =  0 },
+        };
+    }
+};
+
+
+const Snake = struct {
+    allocator : std.mem.Allocator,
+    nodes     : List,
+    facing    : Direction,
+
+    const List = std.SinglyLinkedList(Vec2(u16));
+
+    fn init(comptime len: u8, direction: Direction, posx: u16, posy: u16, allocator: std.mem.Allocator) !@This() {
+        comptime { std.debug.assert(len > 0); }
+
+        const head_position = Vec2(u16) { .x = posx, .y = posy };
+        var nodes: ?*List.Node = null;
+
+        for (0..len) |i| {
+            var new_node = try allocator.create(List.Node);
+            new_node.* = List.Node {
+                .next = nodes,
+                .data = head_position.subtract(direction.toVec2().multiplyInt(@intCast(i))),
+            };
+            nodes = new_node;
+        }
+
+        nodes.?.findLast().*.next = nodes;
+        return @This() {
+            .allocator = allocator,
+            .nodes     = List { .first = nodes, },
+            .facing    = direction,
+        };
+    }
+
+    fn deinit(self: *@This()) void {
+        var node_iter = self.iterOverNodes();
+        while (node_iter.next()) |node| {
+            self.allocator.destroy(node);
+        }
+        self.nodes.first = null;
+    }
+
+    fn iterOverNodes(self: *@This()) SnakeNodeIterator {
+        return SnakeNodeIterator {
+            .snake_arse   = self.nodes.first.?,
+            .current_node = self.nodes.first,
+        };
+    }
+
+    fn render(self: *@This(), writer: anytype, parent_pannel: Pannel) !void {
+        var node_iter = self.iterOverNodes();
+        while (node_iter.next()) |node| {
+            try parent_pannel.setCursor(writer, node.data.x * 2, node.data.y);
+            try writer.print("\x1b[7m  ", .{});
+        }
+    }
+};
+
+const SnakeNodeIterator = struct {
+    snake_arse   :  *List.Node,
+    current_node : ?*List.Node,
+
+    const List = std.SinglyLinkedList(Vec2(u16));
+
+    fn next(self: *@This()) ?*List.Node {
+        const rv = self.current_node orelse return null;
+        self.current_node = rv.next.?;
+        if (self.current_node == self.snake_arse) {
+            self.current_node = null;
+        }
+        return rv;
+    }
+};
+
+
+pub fn main() !void {
+    var window = try Window.init();
     defer window.deinit() catch {};
 
     const writer = window.tty.writer();
-    const pannel = try Pannel.new(writer, 25, 5, 4, 2, 2, 0);
-    try pannel.setCursor(writer, 0, 0);
+    const allocator = std.heap.page_allocator;
 
-    for ("Hello World!") |char| {
-        std.time.sleep(100_000_000);  // Sleep takes nanoseconds
-        try writer.writeByte(char);
-    }
+    const game_pannel_dimensions = Vec2(u16) { .x = 80, .y = 30 };
+    const game_pannel_posision = Vec2(u16) {
+        .x = (window.dimensions.x - game_pannel_dimensions.x) / 2,
+        .y = (window.dimensions.y - game_pannel_dimensions.y) / 2,
+    };
+
+    const pannel = try Pannel.new(writer,
+        game_pannel_dimensions.x, game_pannel_dimensions.y,
+        game_pannel_posision.x, game_pannel_posision.y,
+        0, 0
+    );
+
+    var snake = try Snake.init(5, Direction.Est, 10, 10, allocator);
+    defer snake.deinit();
+    try snake.render(writer, pannel);
 
     while (true) {
         var buffer: [1]u8 = undefined;
@@ -162,4 +267,21 @@ pub fn main() !void {
         }
         try writer.writeAll(&buffer);
     }
+}
+
+
+test "snake_nodes_iter" {
+    const snake_len = 5;
+    var snake = try Snake.init(snake_len, Direction.Est, 10, 10, std.testing.allocator);
+    defer snake.deinit();
+
+    var nb_nodes_seen: u32 = 0;
+    var nodes_iter = snake.iterOverNodes();
+    while (nodes_iter.next()) |node| {
+        nb_nodes_seen += 1;
+        std.debug.print("position of node: ({}, {})\n", .{ node.data.x, node.data.y });
+    }
+
+    std.debug.print("expected: {}, seen: {}", .{ snake_len, nb_nodes_seen });
+    try std.testing.expect(nb_nodes_seen == snake_len);
 }
