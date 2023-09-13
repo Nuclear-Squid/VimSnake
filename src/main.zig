@@ -1,34 +1,31 @@
 const std = @import("std");
 const os  = std.os;
 
+const Direction = enum {
+    Up, Right, Down, Left,
+    const Self = @This();
+
+    inline fn getOpposite(self: Self) Self {
+        return switch (self) {
+            Self.Up    => Self.Down,
+            Self.Right => Self.Left,
+            Self.Down  => Self.Up,
+            Self.Left  => Self.Right,
+        };
+    }
+};
+
 fn Vec2(comptime T: type) type {
     return struct {
-        x: T,
-        y: T,
-        const inner_type = T;
+        x: T, y: T,
+        const Self = @This();
 
-        fn new(x: T, y: T) @This() {
-            return @This() { .x = x, .y = y };
-        }
-
-        fn add(self: @This(), other: anytype) @This() {
-            return @This() {
-                .x = self.x + @as(inner_type, @intCast(other.x)),
-                .y = self.y - @as(inner_type, @intCast(other.y)),
-            };
-        }
-
-        fn subtract(self: @This(), other: anytype) @This() {
-            return @This() {
-                .x = self.x - @as(inner_type, @intCast(other.x)),
-                .y = self.y - @as(inner_type, @intCast(other.y)),
-            };
-        }
-
-        fn multiplyInt(self: @This(), factor: i8) @This() {
-            return @This() {
-                .x = self.x * factor,
-                .y = self.y * factor,
+        inline fn stepBy(self: *const Self, direction: Direction, n_steps: u16) Self {
+            return switch (direction) {
+                Direction.Up    => Self { .x = self.x           , .y = self.y -| n_steps },
+                Direction.Right => Self { .x = self.x +| n_steps, .y = self.y            },
+                Direction.Down  => Self { .x = self.x           , .y = self.y +| n_steps },
+                Direction.Left  => Self { .x = self.x -| n_steps, .y = self.y            },
             };
         }
     };
@@ -36,9 +33,9 @@ fn Vec2(comptime T: type) type {
 
 const Pannel = struct {
     /// Total dimensions of the Pannel (border included)
-    dimensions    : Vec2(u16),
-    position      : Vec2(u16),
-    padding       : Vec2(u16),
+    dimensions : Vec2(u16),
+    position   : Vec2(u16),
+    padding    : Vec2(u16),
 
     fn new(writer: anytype, dimx: u16, dimy: u16, posx: u16, posy: u16, padx: u16, pady: u16) !@This() {
         const allocator = std.heap.page_allocator;
@@ -57,9 +54,9 @@ const Pannel = struct {
 
 
         return Pannel {
-            .dimensions = Vec2(u16).new(dimx, dimy),
-            .position   = Vec2(u16).new(posx, posy),
-            .padding    = Vec2(u16).new(padx, pady),
+            .dimensions = Vec2(u16) { .x = dimx, .y = dimy },
+            .position   = Vec2(u16) { .x = posx, .y = posy },
+            .padding    = Vec2(u16) { .x = padx, .y = pady },
         };
     }
 
@@ -81,12 +78,12 @@ const Pannel = struct {
         const line = try allocator.alloc(u8, self.dimensions.x - 2);
         defer allocator.free(line);
 
-        for (1..self.dimensions.x - 2) |i| {
+        for (0..self.dimensions.x - 2) |i| {
             line[i] = ' ';
         }
 
-        for (1..self.dimensions.y - 1) |i| {
-            try self.setCursor(writer, 1, @intCast(i));
+        for (0..self.dimensions.y - 1) |i| {
+            try self.setCursor(writer, 0, @intCast(i));
             try writer.writeAll(line);
         }
     }
@@ -173,19 +170,6 @@ const Window = struct {
     }
 };
 
-const Direction = enum {
-    North, Est, South, West,
-
-    fn toVec2(self: @This()) Vec2(i8) {
-        return switch (self) {
-            @This().North => Vec2(i8) { .x =  0, .y = -1 },
-            @This().Est   => Vec2(i8) { .x =  1, .y =  0 },
-            @This().South => Vec2(i8) { .x =  0, .y =  1 },
-            @This().West  => Vec2(i8) { .x = -1, .y =  0 },
-        };
-    }
-};
-
 
 const Snake = struct {
     allocator : std.mem.Allocator,
@@ -205,7 +189,7 @@ const Snake = struct {
             var new_node = try allocator.create(List.Node);
             new_node.* = List.Node {
                 .next = nodes,
-                .data = head_position.subtract(direction.toVec2().multiplyInt(@intCast(i))),
+                .data = head_position.stepBy(direction.getOpposite(), @intCast(i)),
             };
             nodes = new_node;
         }
@@ -244,10 +228,16 @@ const Snake = struct {
     }
 
     fn step(self: *@This()) void {
-        const new_mouth_pos = self.mouth_pos.add(self.facing.toVec2());
+        const new_mouth_pos = self.mouth_pos.stepBy(self.facing, 1);
         self.nodes.first.?.data = new_mouth_pos;
         self.nodes.first = self.nodes.first.?.next;
         self.mouth_pos = new_mouth_pos;
+    }
+
+    inline fn setDirection(self: *@This(), new_direction: Direction) void {
+        if (self.facing.getOpposite() != new_direction) {
+            self.facing = new_direction;
+        }
     }
 };
 
@@ -287,31 +277,33 @@ pub fn main() !void {
         0, 0
     );
 
-    var snake = try Snake.init(5, Direction.Est, 10, 10, allocator);
+    var snake = try Snake.init(5, Direction.Right, 10, 10, allocator);
     defer snake.deinit();
 
-    try snake.render(writer, pannel);
-    for (0..10) |_| {
-        std.time.sleep(100_000_000);
+    game_loop: while (true) {
+        // Handle keyboard input
+        var buffer: [1]u8 = undefined;
+        _ = try window.tty.read(&buffer);
+        switch (buffer[0]) {
+            'q' => break :game_loop,
+            'h' => snake.setDirection(Direction.Left),
+            'j' => snake.setDirection(Direction.Down),
+            'k' => snake.setDirection(Direction.Up),
+            'l' => snake.setDirection(Direction.Right),
+            else => {},
+        }
+
         try pannel.clear(writer);
         snake.step();
         try snake.render(writer, pannel);
-    }
-
-    while (true) {
-        var buffer: [1]u8 = undefined;
-        _ = try window.tty.read(&buffer);
-        if (buffer[0] == 'q') {
-            return;
-        }
-        try writer.writeAll(&buffer);
+        std.time.sleep(100_000_000);
     }
 }
 
 
 test "snake_nodes_iter" {
     const snake_len = 5;
-    var snake = try Snake.init(snake_len, Direction.Est, 10, 10, std.testing.allocator);
+    var snake = try Snake.init(snake_len, Direction.Right, 10, 10, std.testing.allocator);
     defer snake.deinit();
 
     var nb_nodes_seen: u32 = 0;
