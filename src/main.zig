@@ -136,7 +136,7 @@ const Window = struct {
 
         // Syscall stuff, don’t really get it.
         termios.cc[os.system.V.TIME] = 0;
-        termios.cc[os.system.V.MIN]  = 1;
+        termios.cc[os.system.V.MIN]  = 0;
 
         // Apply changes
         try os.tcsetattr(tty.handle, .FLUSH, termios);
@@ -282,7 +282,7 @@ pub fn main() !void {
 
     game_loop: while (true) {
         // Handle keyboard input
-        var buffer: [1]u8 = undefined;
+        var buffer: [1]u8 = std.mem.zeroes([1]u8);
         _ = try window.tty.read(&buffer);
         switch (buffer[0]) {
             'q' => break :game_loop,
