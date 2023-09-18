@@ -170,7 +170,6 @@ const Window = struct {
     }
 };
 
-
 const Snake = struct {
     allocator : std.mem.Allocator,
     nodes     : List,
@@ -212,12 +211,26 @@ const Snake = struct {
         self.nodes.first = null;
     }
 
-    fn iterOverNodes(self: *@This()) SnakeNodeIterator {
+    fn iterOverNodes(self: *const @This()) SnakeNodeIterator {
         return SnakeNodeIterator {
             .snake_arse   = self.nodes.first.?,
             .current_node = self.nodes.first,
         };
     }
+
+    const SnakeNodeIterator = struct {
+        snake_arse   :  *List.Node,
+        current_node : ?*List.Node,
+
+        fn next(self: *@This()) ?*List.Node {
+            const rv = self.current_node orelse return null;
+            self.current_node = rv.next.?;
+            if (self.current_node == self.snake_arse) {
+                self.current_node = null;
+            }
+            return rv;
+        }
+    };
 
     fn render(self: *@This(), writer: anytype, parent_pannel: Pannel) !void {
         var node_iter = self.iterOverNodes();
@@ -227,11 +240,56 @@ const Snake = struct {
         }
     }
 
-    fn step(self: *@This()) void {
+    const StepError = error { Crashed };
+
+    /// Returns the index of the fruit that was eaten, if there was one.
+    fn step(self: *@This(), parent_pannel: *const Pannel, fruits: []Vec2(u16)) (std.mem.Allocator.Error || StepError)!?usize {
         const new_mouth_pos = self.mouth_pos.stepBy(self.facing, 1);
+
+        // Check snake is still inbounds
+        if (new_mouth_pos.x == 0 or new_mouth_pos.x == (parent_pannel.dimensions.x / 2) - 1 or
+            new_mouth_pos.y == 0 or new_mouth_pos.y == parent_pannel.dimensions.y - 1)
+        {
+            return StepError.Crashed;
+        }
+
+        // Check if snake ate itself
+        var iter = self.iterOverNodes();
+        _ = iter.next();  // ignore the soon-to-be new head
+        while (iter.next()) |node| {
+            if (std.meta.eql(new_mouth_pos, node.data)) {
+                return StepError.Crashed;
+            }
+        }
+
+        const rv =
+            for (fruits, 0..) |fruit_pos, i| {
+                if (std.meta.eql(new_mouth_pos, fruit_pos)) {
+                    // Eat the fruit, and grow in length.
+                    var new_tail = try self.allocator.create(List.Node);
+                    new_tail.* = self.nodes.first.?.*;
+                    self.nodes.first.?.next = new_tail;
+                    break i;
+                }
+            }
+            else null;
+
+        // step forward
         self.nodes.first.?.data = new_mouth_pos;
         self.nodes.first = self.nodes.first.?.next;
         self.mouth_pos = new_mouth_pos;
+
+        return rv;
+    }
+
+    fn onAFruit(self: *const @This(), fruits: []Vec2(u16)) ?usize {
+        var iter = self.iterOverNodes();
+        while (iter.next()) |node| {
+            for (fruits, 0..) |fruit_pos, i| {
+                if (std.meta.eql(node.data, fruit_pos)) return i;
+            }
+        }
+        return null;
     }
 
     inline fn setDirection(self: *@This(), new_direction: Direction) void {
@@ -241,22 +299,32 @@ const Snake = struct {
     }
 };
 
-const SnakeNodeIterator = struct {
-    snake_arse   :  *List.Node,
-    current_node : ?*List.Node,
-
-    const List = std.SinglyLinkedList(Vec2(u16));
-
-    fn next(self: *@This()) ?*List.Node {
-        const rv = self.current_node orelse return null;
-        self.current_node = rv.next.?;
-        if (self.current_node == self.snake_arse) {
-            self.current_node = null;
+fn moveFruit(rng: *std.rand.Random, parent_pannel: *const Pannel, fruits: []Vec2(u16), fruit_index: usize) void {
+    try_position: while (true) {
+        const max_x = (parent_pannel.dimensions.x - (parent_pannel.padding.x * 2) - 1) / 2;
+        const max_y = parent_pannel.dimensions.y - (parent_pannel.padding.y * 2) - 1;
+        const new_fruit_pos = Vec2(u16) {
+            .x = rng.uintLessThan(u16, max_x),
+            .y = rng.uintLessThan(u16, max_y)
+        };
+        for (fruits) |fruit_pos| {
+            if (std.meta.eql(fruit_pos, new_fruit_pos)) {
+                continue :try_position;
+            }
         }
-        return rv;
+        fruits[fruit_index] = new_fruit_pos;
+        return;
     }
-};
+}
 
+fn renderFruits(writer: anytype, parent_pannel: *const Pannel, fruits: []Vec2(u16)) !void {
+    _ = try writer.write("\x1b[41m");
+    for (fruits) |fruit| {
+        try parent_pannel.setCursor(writer, fruit.x * 2, fruit.y);
+        _ = try writer.write("  ");
+    }
+    _ = try writer.write("\x1b[0m");
+}
 
 pub fn main() !void {
     var window = try Window.init();
@@ -280,24 +348,43 @@ pub fn main() !void {
     var snake = try Snake.init(5, Direction.Right, 10, 10, allocator);
     defer snake.deinit();
 
+    var default_prng = std.rand.DefaultPrng.init(@intCast(std.time.timestamp()));
+    var rng = default_prng.random();
+
+    const nb_fruits = 5;
+    var fruits: [nb_fruits]Vec2(u16) = undefined;
+    for (0..nb_fruits) |i| {
+        moveFruit(&rng, &pannel, &fruits, i);
+    }
+
     game_loop: while (true) {
         // Handle keyboard input
         var buffer: [1]u8 = std.mem.zeroes([1]u8);
         _ = try window.tty.read(&buffer);
         switch (buffer[0]) {
-            'q' => break :game_loop,
-            'h' => snake.setDirection(Direction.Left),
-            'j' => snake.setDirection(Direction.Down),
-            'k' => snake.setDirection(Direction.Up),
-            'l' => snake.setDirection(Direction.Right),
+            'q'  => break :game_loop,
+            'h'  => snake.setDirection(Direction.Left),
+            'j'  => snake.setDirection(Direction.Down),
+            'k'  => snake.setDirection(Direction.Up),
+            'l'  => snake.setDirection(Direction.Right),
             else => {},
         }
 
         try pannel.clear(writer);
-        snake.step();
+        if (snake.step(&pannel, &fruits) catch break :game_loop) |fruit_eaten_index| {
+            moveFruit(&rng, &pannel, &fruits, fruit_eaten_index);
+            while (snake.onAFruit(&fruits)) |i| {
+                moveFruit(&rng, &pannel, &fruits, i);
+            }
+        }
         try snake.render(writer, pannel);
-        std.time.sleep(100_000_000);
+        try renderFruits(writer, &pannel, &fruits);
+        std.time.sleep(400_000_000);
     }
+
+    try pannel.setCursor(writer, 0, 0);
+    _ = try writer.write("Game Over.");
+    std.time.sleep(1_000_000_000);
 }
 
 
