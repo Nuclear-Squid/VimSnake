@@ -23,6 +23,38 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    
+    const types_module = b.addModule("common-types", .{
+        .source_file = .{ .path = "src/common_types.zig" },
+    });
+
+    const tui = b.addModule("tui", .{
+        .source_file  = .{ .path = "src/tui.zig" },
+        .dependencies = &[_]std.build.ModuleDependency {
+            .{
+                .name = "common-types",
+                .module = types_module,
+            },
+        },
+    });
+
+    exe.addModule("tui", tui);
+
+    exe.addModule("snake",
+        b.addModule("snake", .{
+            .source_file  = .{ .path = "src/snake.zig" },
+            .dependencies = &[_]std.build.ModuleDependency {
+                .{
+                    .name   = "common-types",
+                    .module = types_module,
+                },
+                .{
+                    .name   = "tui",
+                    .module =  tui,
+                },
+            },
+        })
+    );
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
