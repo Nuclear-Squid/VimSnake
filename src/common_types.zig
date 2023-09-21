@@ -16,13 +16,14 @@ pub fn Vec2(comptime T: type) type {
     return struct {
         x: T, y: T,
         const Self = @This();
+        const D = Direction;
 
-        pub inline fn stepBy(self: *const Self, direction: Direction, n_steps: u16) Self {
+        pub inline fn stepBy(self: *const Self, direction: D, n_steps: u16) Self {
             return switch (direction) {
-                Direction.Up    => Self { .x = self.x           , .y = self.y -| n_steps },
-                Direction.Right => Self { .x = self.x +| n_steps, .y = self.y            },
-                Direction.Down  => Self { .x = self.x           , .y = self.y +| n_steps },
-                Direction.Left  => Self { .x = self.x -| n_steps, .y = self.y            },
+                D.Up    => Self { .x = self.x           , .y = self.y -| n_steps },
+                D.Right => Self { .x = self.x +| n_steps, .y = self.y            },
+                D.Down  => Self { .x = self.x           , .y = self.y +| n_steps },
+                D.Left  => Self { .x = self.x -| n_steps, .y = self.y            },
             };
         }
     };

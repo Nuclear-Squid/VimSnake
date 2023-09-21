@@ -1,6 +1,6 @@
 const std = @import("std");
 
-// Local libs
+// Local modules
 const tui = @import("tui");
 const Vec2      = @import("common-types").Vec2;
 const Direction = @import("common-types").Direction;
@@ -39,28 +39,54 @@ pub const Game = struct {
     }
 
     pub fn play(self: *Self) !void {
+        try self.render();
         game_loop: while (true) {
+            std.time.sleep(400_000_000);
             // Handle keyboard input
             var buffer: [1]u8 = std.mem.zeroes([1]u8);
             _ = try self.pannel.tty.read(&buffer);
-            switch (buffer[0]) {
-                'q'  => break :game_loop,
-                'h'  => self.snake.setDirection(Direction.Left),
-                'j'  => self.snake.setDirection(Direction.Down),
-                'k'  => self.snake.setDirection(Direction.Up),
-                'l'  => self.snake.setDirection(Direction.Right),
-                else => {},
+
+            const command = Snake.Command {
+                .direction = switch (buffer[0]) {
+                    'q' => break :game_loop,
+                    'h', 'b', '^' => Direction.Left,
+                    'j', '}', 'G' => Direction.Down,
+                    'k', '{', 'g' => Direction.Up,
+                    'l', 'w', '$' => Direction.Right,
+                    else => self.snake.facing,
+                },
+                .action = switch (buffer[0]) {
+                    'h', 'j', 'k', 'l' => Snake.Action.step,
+                    'b', '{', '}', 'w' => Snake.Action.leap,
+                    '$', 'G', 'g', '^' => Snake.Action.go_to_edge,
+                    else => Snake.Action.step,
+                },
+            };
+
+            const new_head_position = self.snake
+                    .getNewHeadPosition(command, self.pannel.getInnerDimensions())
+                    catch break :game_loop;
+            
+            for (self.fruits, 0..) |fruit, fruit_pos| {
+                if (std.meta.eql(new_head_position, fruit)) {
+                    try self.snake.growWithNewHead(new_head_position);
+                    self.moveFruit(fruit_pos);
+                    break;
+                }
+            }
+            else {
+                self.snake.applyNewHead(new_head_position);
+            }
+
+            if (command.action == Snake.Action.go_to_edge) {
+                self.snake.facing = command.direction.getOpposite();
+            }
+            else {
+                self.snake.facing = command.direction;
             }
 
             try self.pannel.clear();
-            if (self.snake.step(&self.pannel, &self.fruits) catch break :game_loop) |fruit_eaten_index| {
-                self.moveFruit(fruit_eaten_index);
-                while (self.snake.onAFruit(&self.fruits)) |i| {
-                    self.moveFruit(i);
-                }
-            }
             try self.render();
-            std.time.sleep(400_000_000);
         }
 
         try self.pannel.setCursor(0, 0);
@@ -70,13 +96,14 @@ pub const Game = struct {
 
     fn moveFruit(self: *Self, fruit_index: usize) void {
         try_position: while (true) {
-            const max_x = (self.pannel.dimensions.x - (self.pannel.padding.x * 2) - 1) / 2;
-            const max_y =  self.pannel.dimensions.y - (self.pannel.padding.y * 2) - 1;
+            const pannel_dim = self.pannel.getInnerDimensions();
             const rng = self.prng.random();
+
             const new_fruit_pos = Vec2(u16) {
-                .x = rng.uintLessThan(u16, max_x),
-                .y = rng.uintLessThan(u16, max_y)
+                .x = rng.uintLessThan(u16, pannel_dim.x / 2),
+                .y = rng.uintLessThan(u16, pannel_dim.y)
             };
+
             for (self.fruits) |fruit_pos| {
                 if (std.meta.eql(fruit_pos, new_fruit_pos)) {
                     continue :try_position;
@@ -89,6 +116,7 @@ pub const Game = struct {
                     continue :try_position;
                 }
             }
+
             self.fruits[fruit_index] = new_fruit_pos;
             return;
         }
@@ -117,9 +145,10 @@ const Snake = struct {
     mouth_pos : Vec2(u16),
     facing    : Direction,
 
+    const Self = @This();
     const List = std.SinglyLinkedList(Vec2(u16));
 
-    fn init(comptime len: u8, direction: Direction, posx: u16, posy: u16, allocator: std.mem.Allocator) !@This() {
+    fn init(comptime len: u8, direction: Direction, posx: u16, posy: u16, allocator: std.mem.Allocator) !Self {
         comptime { std.debug.assert(len > 0); }
 
         const head_position = Vec2(u16) { .x = posx, .y = posy };
@@ -136,7 +165,7 @@ const Snake = struct {
 
         const mouth = nodes.?.findLast();
         mouth.*.next = nodes;
-        return @This() {
+        return Self {
             .allocator = allocator,
             .nodes     = List { .first = nodes, },
             .facing    = direction,
@@ -144,7 +173,7 @@ const Snake = struct {
         };
     }
 
-    fn deinit(self: *@This()) void {
+    fn deinit(self: *Self) void {
         var node_iter = self.iterOverNodes();
         while (node_iter.next()) |node| {
             self.allocator.destroy(node);
@@ -152,14 +181,14 @@ const Snake = struct {
         self.nodes.first = null;
     }
 
-    fn iterOverNodes(self: *const @This()) SnakeNodeIterator {
-        return SnakeNodeIterator {
+    fn iterOverNodes(self: *const Self) NodeIterator {
+        return NodeIterator {
             .snake_arse   = self.nodes.first.?,
             .current_node = self.nodes.first,
         };
     }
 
-    const SnakeNodeIterator = struct {
+    const NodeIterator = struct {
         snake_arse   :  *List.Node,
         current_node : ?*List.Node,
 
@@ -173,62 +202,53 @@ const Snake = struct {
         }
     };
 
-    const StepError = error { Crashed };
+    const Action  = enum { step, leap, go_to_edge };
+    const Command = struct {
+        action   : Action,
+        direction: Direction,
+    };
 
-    /// Returns the index of the fruit that was eaten, if there was one.
-    fn step(self: *@This(), parent_pannel: *const tui.Pannel, fruits: []Vec2(u16)) (std.mem.Allocator.Error || StepError)!?usize {
-        const new_mouth_pos = self.mouth_pos.stepBy(self.facing, 1);
+    const StepError = error { crashed };
 
-        // Check snake is still inbounds
-        if (new_mouth_pos.x == 0 or new_mouth_pos.x == (parent_pannel.dimensions.x / 2) - 1 or
-            new_mouth_pos.y == 0 or new_mouth_pos.y == parent_pannel.dimensions.y - 1)
+    fn getNewHeadPosition(self: *const Self, command: Command, pannel_dim: Vec2(u16)) StepError!Vec2(u16) {
+        const new_head_position = switch (command.action) {
+            Action.step => self.mouth_pos.stepBy(command.direction, 1),
+            Action.leap => self.mouth_pos.stepBy(command.direction, 5),
+            Action.go_to_edge => switch (command.direction) {
+                Direction.Up    => Vec2(u16) { .x = self.mouth_pos.x, .y = 0 },
+                Direction.Down  => Vec2(u16) { .x = self.mouth_pos.x, .y = pannel_dim.y },
+                Direction.Left  => Vec2(u16) { .x = 0, .y = self.mouth_pos.y },
+                Direction.Right => Vec2(u16) { .x = pannel_dim.x / 2 - 1, .y = self.mouth_pos.y },
+            },
+        };
+
+        if (new_head_position.x > pannel_dim.x / 2 - 1 or
+            new_head_position.y > pannel_dim.y)
         {
-            return StepError.Crashed;
+            return StepError.crashed;
         }
 
-        // Check if snake ate itself
         var iter = self.iterOverNodes();
-        _ = iter.next();  // ignore the soon-to-be new head
         while (iter.next()) |node| {
-            if (std.meta.eql(new_mouth_pos, node.data)) {
-                return StepError.Crashed;
+            if (std.meta.eql(node.data, new_head_position)) {
+                return StepError.crashed;
             }
         }
 
-        const rv =
-            for (fruits, 0..) |fruit_pos, i| {
-                if (std.meta.eql(new_mouth_pos, fruit_pos)) {
-                    // Eat the fruit, and grow in length.
-                    var new_tail = try self.allocator.create(List.Node);
-                    new_tail.* = self.nodes.first.?.*;
-                    self.nodes.first.?.next = new_tail;
-                    break i;
-                }
-            }
-            else null;
+        return new_head_position;
+    }
 
-        // step forward
+    inline fn applyNewHead(self: *Self, new_mouth_pos: Vec2(u16)) void {
         self.nodes.first.?.data = new_mouth_pos;
         self.nodes.first = self.nodes.first.?.next;
         self.mouth_pos = new_mouth_pos;
-
-        return rv;
     }
 
-    fn onAFruit(self: *const @This(), fruits: []Vec2(u16)) ?usize {
-        var iter = self.iterOverNodes();
-        while (iter.next()) |node| {
-            for (fruits, 0..) |fruit_pos, i| {
-                if (std.meta.eql(node.data, fruit_pos)) return i;
-            }
-        }
-        return null;
-    }
-
-    inline fn setDirection(self: *@This(), new_direction: Direction) void {
-        if (self.facing.getOpposite() != new_direction) {
-            self.facing = new_direction;
-        }
+    inline fn growWithNewHead(self: *Self, new_mouth_pos: Vec2(u16)) std.mem.Allocator.Error!void {
+        var new_tail = try self.allocator.create(List.Node);
+        new_tail.* = self.nodes.first.?.*;
+        self.nodes.first.?.next = new_tail;
+        self.applyNewHead(new_mouth_pos);
     }
 };
 
